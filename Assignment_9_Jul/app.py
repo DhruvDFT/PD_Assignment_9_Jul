@@ -1,18 +1,479 @@
-# app.py (Updated with Railway compatibility)
+# Enhanced PD Assessment System with Advanced Features
 import os
 import hashlib
+import json
+import random
+import sqlite3
 from datetime import datetime, timedelta
-from flask import Flask, request, redirect, session
+from threading import Lock
+from flask import Flask, request, redirect, session, jsonify, render_template_string
+import re
 
 # Create Flask app
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'pd-secret-key')
+app.secret_key = os.environ.get('SECRET_KEY', 'pd-secret-key-enhanced')
 
-# Global data
-users = {}
-assignments = {}
-counter = 0
+# Database setup
+DATABASE = 'enhanced_assessments.db'
+db_lock = Lock()
 
+class DatabaseManager:
+    @staticmethod
+    def init_db():
+        """Initialize SQLite database with enhanced schema"""
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        
+        # Users table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                username TEXT UNIQUE,
+                display_name TEXT,
+                email TEXT,
+                password TEXT,
+                is_admin BOOLEAN DEFAULT 0,
+                experience INTEGER DEFAULT 3,
+                department TEXT,
+                created_date TEXT,
+                last_login TEXT,
+                theme TEXT DEFAULT 'light'
+            )
+        """)
+        
+        # Assignments table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS assignments (
+                id TEXT PRIMARY KEY,
+                engineer_id TEXT,
+                topic TEXT,
+                questions TEXT,
+                created_date TEXT,
+                due_date TEXT,
+                status TEXT DEFAULT 'pending',
+                difficulty_level INTEGER DEFAULT 1,
+                max_points INTEGER DEFAULT 180,
+                created_by TEXT,
+                FOREIGN KEY (engineer_id) REFERENCES users (id)
+            )
+        """)
+        
+        # Submissions table (enhanced)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS submissions (
+                id TEXT PRIMARY KEY,
+                assignment_id TEXT,
+                engineer_id TEXT,
+                answers TEXT,
+                submitted_date TEXT,
+                status TEXT DEFAULT 'submitted',
+                auto_scores TEXT,
+                manual_scores TEXT,
+                feedback TEXT,
+                total_score INTEGER DEFAULT 0,
+                graded_by TEXT,
+                graded_date TEXT,
+                time_spent INTEGER DEFAULT 0,
+                FOREIGN KEY (assignment_id) REFERENCES assignments (id),
+                FOREIGN KEY (engineer_id) REFERENCES users (id)
+            )
+        """)
+        
+        # Analytics table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS analytics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT,
+                user_id TEXT,
+                data TEXT,
+                timestamp TEXT
+            )
+        """)
+        
+        # Question pools table (for smart generation)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS question_pools (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic TEXT,
+                difficulty INTEGER,
+                template TEXT,
+                parameters TEXT,
+                usage_count INTEGER DEFAULT 0,
+                effectiveness_score REAL DEFAULT 0.0
+            )
+        """)
+        
+        conn.commit()
+        conn.close()
+    
+    @staticmethod
+    def log_analytics(event_type, user_id, data=None):
+        """Log analytics events"""
+        with db_lock:
+            conn = sqlite3.connect(DATABASE)
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO analytics (event_type, user_id, data, timestamp)
+                VALUES (?, ?, ?, ?)
+            """, (event_type, user_id, json.dumps(data) if data else None, datetime.now().isoformat()))
+            conn.commit()
+            conn.close()
+
+# Enhanced Question Generation with Smart AI
+class SmartQuestionGenerator:
+    def __init__(self):
+        self.question_templates = {
+            "sta": [
+                {
+                    "template": "Your design has {violation_type} violations of {violation_amount}ps on {num_paths} critical paths. The design is running at {frequency}MHz. Analyze the root causes and propose {num_solutions} specific solutions with expected improvement estimates.",
+                    "difficulty": 3,
+                    "focus": ["timing_analysis", "problem_solving"],
+                    "parameters": {
+                        "violation_type": ["setup", "hold", "max_transition"],
+                        "violation_amount": [20, 50, 100, 150, 200],
+                        "num_paths": [10, 25, 50, 100, 200],
+                        "frequency": [500, 800, 1000, 1500, 2000],
+                        "num_solutions": [3, 4, 5]
+                    }
+                },
+                {
+                    "template": "Explain the concept of {concept} in static timing analysis. How does it impact {impact_area} and what are the industry-standard approaches to handle it in {technology_node} designs?",
+                    "difficulty": 2,
+                    "focus": ["concepts", "industry_knowledge"],
+                    "parameters": {
+                        "concept": ["clock jitter", "OCV", "useful skew", "clock latency", "timing corners"],
+                        "impact_area": ["setup timing", "hold timing", "power consumption", "area optimization"],
+                        "technology_node": ["7nm", "5nm", "3nm", "advanced nodes"]
+                    }
+                },
+                {
+                    "template": "You're analyzing a {design_type} with {num_domains} clock domains running at different frequencies ({freq_list}). Describe your approach to handle clock domain crossings and ensure timing closure across all interfaces.",
+                    "difficulty": 4,
+                    "focus": ["multi_domain", "advanced_concepts"],
+                    "parameters": {
+                        "design_type": ["SoC", "CPU", "GPU", "AI accelerator"],
+                        "num_domains": [3, 4, 5, 6],
+                        "freq_list": ["100MHz/500MHz/1GHz", "200MHz/800MHz/1.5GHz", "50MHz/1GHz/2GHz"]
+                    }
+                }
+            ],
+            "cts": [
+                {
+                    "template": "Design a clock tree for a {design_size} design with {num_flops} flip-flops distributed across {die_size}. The target skew is {target_skew}ps and you have {buffer_types} buffer types available. Explain your tree topology choice and optimization strategy.",
+                    "difficulty": 3,
+                    "focus": ["tree_design", "optimization"],
+                    "parameters": {
+                        "design_size": ["large-scale", "medium-scale", "complex"],
+                        "num_flops": [10000, 25000, 50000, 100000],
+                        "die_size": ["5mm x 5mm", "10mm x 10mm", "15mm x 15mm"],
+                        "target_skew": [25, 50, 75, 100],
+                        "buffer_types": [3, 4, 5, 6]
+                    }
+                },
+                {
+                    "template": "Your clock tree has {power_consumption}mW power consumption, which is {percentage}% of total chip power. Propose {num_techniques} specific techniques to reduce clock power while maintaining {skew_constraint}ps skew constraint.",
+                    "difficulty": 4,
+                    "focus": ["power_optimization", "constraints"],
+                    "parameters": {
+                        "power_consumption": [50, 100, 150, 200],
+                        "percentage": [15, 20, 25, 30, 35],
+                        "num_techniques": [3, 4, 5],
+                        "skew_constraint": [30, 50, 75]
+                    }
+                }
+            ],
+            "signoff": [
+                {
+                    "template": "Your design failed {check_type} with {num_violations} violations. The violations are distributed as: {violation_dist}. Create a systematic debugging and resolution plan with priority ordering and estimated effort.",
+                    "difficulty": 3,
+                    "focus": ["debugging", "project_management"],
+                    "parameters": {
+                        "check_type": ["DRC", "LVS", "Antenna", "Metal Density"],
+                        "num_violations": [50, 100, 200, 500],
+                        "violation_dist": ["70% spacing, 20% width, 10% via", "50% density, 30% spacing, 20% antenna", "60% LVS nets, 25% devices, 15% properties"]
+                    }
+                },
+                {
+                    "template": "Perform signoff analysis for a {design_type} in {technology} process. The design has {power_domains} power domains and {io_count} I/Os. List all required signoff checks and create a verification plan with timeline and responsibilities.",
+                    "difficulty": 4,
+                    "focus": ["signoff_flow", "planning"],
+                    "parameters": {
+                        "design_type": ["automotive SoC", "mobile processor", "IoT chip", "high-performance CPU"],
+                        "technology": ["7nm FinFET", "5nm", "3nm GAA"],
+                        "power_domains": [2, 3, 4, 5],
+                        "io_count": [100, 200, 500, 1000]
+                    }
+                }
+            ]
+        }
+    
+    def generate_smart_questions(self, topic, num_questions=18, engineer_exp=3):
+        """Generate questions with adaptive difficulty"""
+        templates = self.question_templates.get(topic, [])
+        if not templates:
+            return self._fallback_questions(topic)
+        
+        questions = []
+        difficulty_distribution = self._get_difficulty_distribution(engineer_exp, num_questions)
+        
+        for target_difficulty in difficulty_distribution:
+            suitable_templates = [t for t in templates if abs(t["difficulty"] - target_difficulty) <= 1]
+            if not suitable_templates:
+                suitable_templates = templates
+            
+            template = random.choice(suitable_templates)
+            question = self._generate_from_template(template)
+            questions.append(question)
+        
+        return questions[:num_questions]
+    
+    def _get_difficulty_distribution(self, engineer_exp, num_questions):
+        """Create difficulty distribution based on experience"""
+        if engineer_exp <= 2:
+            # Junior: 60% easy, 30% medium, 10% hard
+            easy_count = int(num_questions * 0.6)
+            medium_count = int(num_questions * 0.3)
+            hard_count = num_questions - easy_count - medium_count
+            return [2] * easy_count + [3] * medium_count + [4] * hard_count
+        elif engineer_exp <= 4:
+            # Mid: 30% easy, 50% medium, 20% hard
+            easy_count = int(num_questions * 0.3)
+            medium_count = int(num_questions * 0.5)
+            hard_count = num_questions - easy_count - medium_count
+            return [2] * easy_count + [3] * medium_count + [4] * hard_count
+        else:
+            # Senior: 20% easy, 40% medium, 40% hard
+            easy_count = int(num_questions * 0.2)
+            medium_count = int(num_questions * 0.4)
+            hard_count = num_questions - easy_count - medium_count
+            return [2] * easy_count + [3] * medium_count + [4] * hard_count
+    
+    def _generate_from_template(self, template_data):
+        """Generate question from template with random parameters"""
+        template = template_data["template"]
+        params = template_data["parameters"]
+        
+        # Generate random parameters
+        generated_params = {}
+        for param, options in params.items():
+            generated_params[param] = random.choice(options)
+        
+        try:
+            return template.format(**generated_params)
+        except KeyError:
+            return template  # Return template as-is if parameter missing
+    
+    def _fallback_questions(self, topic):
+        """Fallback to static questions if smart generation fails"""
+        fallback = {
+            "sta": [
+                "What is Static Timing Analysis and why is it critical in modern chip design?",
+                "Explain setup and hold time violations. How do you debug and fix them?",
+                "What is clock skew and how does it impact timing closure?",
+                "Describe the concept of timing corners and their importance in analysis.",
+                "How do you handle timing analysis for multiple clock domains?"
+            ],
+            "cts": [
+                "What is Clock Tree Synthesis and what are its main objectives?",
+                "Explain different clock tree topologies and when to use each.",
+                "How do you optimize clock trees for power consumption?",
+                "What is useful skew and how can it help timing closure?",
+                "Describe challenges in CTS for high-frequency designs."
+            ],
+            "signoff": [
+                "What are the main signoff checks required before tape-out?",
+                "Explain DRC violations and systematic approaches to fix them.",
+                "What is LVS and how do you debug LVS mismatches?",
+                "Describe IR drop analysis and mitigation techniques.",
+                "How do you perform timing signoff for multi-corner analysis?"
+            ]
+        }
+        
+        base_questions = fallback.get(topic, fallback["sta"])
+        # Extend to 18 questions by repeating and modifying
+        extended = []
+        for i in range(18):
+            base_q = base_questions[i % len(base_questions)]
+            if i >= len(base_questions):
+                extended.append(f"Advanced: {base_q}")
+            else:
+                extended.append(base_q)
+        return extended
+
+# Enhanced Scoring System
+class EnhancedScoringSystem:
+    def __init__(self):
+        self.scoring_rubrics = {
+            "sta": {
+                "technical_terms": ["setup", "hold", "slack", "skew", "jitter", "corner", "violation", "closure"],
+                "advanced_terms": ["ocv", "cppr", "useful skew", "clock latency", "propagated", "ideal"],
+                "methodology_terms": ["debug", "optimize", "analyze", "systematic", "root cause"],
+                "weights": {"technical": 0.4, "depth": 0.3, "methodology": 0.2, "clarity": 0.1}
+            },
+            "cts": {
+                "technical_terms": ["clock tree", "skew", "insertion delay", "buffer", "topology", "synthesis"],
+                "advanced_terms": ["h-tree", "mesh", "useful skew", "gating", "power optimization"],
+                "methodology_terms": ["balance", "optimize", "strategy", "approach", "technique"],
+                "weights": {"technical": 0.4, "depth": 0.3, "methodology": 0.2, "clarity": 0.1}
+            },
+            "signoff": {
+                "technical_terms": ["drc", "lvs", "antenna", "density", "ir drop", "em", "signoff"],
+                "advanced_terms": ["formal verification", "multi-corner", "yield analysis", "si analysis"],
+                "methodology_terms": ["debug", "systematic", "flow", "process", "validation"],
+                "weights": {"technical": 0.4, "depth": 0.3, "methodology": 0.2, "clarity": 0.1}
+            }
+        }
+    
+    def analyze_answer_comprehensive(self, question, answer, topic):
+        """Comprehensive answer analysis with detailed feedback"""
+        if not answer or len(answer.strip()) < 20:
+            return {
+                "score": 0,
+                "breakdown": {"technical": 0, "depth": 0, "methodology": 0, "clarity": 0},
+                "feedback": "Answer too short or empty",
+                "suggestions": ["Provide more detailed technical explanation", "Include specific examples", "Explain methodology"]
+            }
+        
+        rubric = self.scoring_rubrics.get(topic, self.scoring_rubrics["sta"])
+        answer_lower = answer.lower()
+        word_count = len(answer.split())
+        
+        # Technical accuracy score
+        technical_score = self._score_technical_content(answer_lower, rubric)
+        
+        # Depth and detail score
+        depth_score = self._score_depth(answer, word_count)
+        
+        # Methodology score
+        methodology_score = self._score_methodology(answer_lower, rubric)
+        
+        # Clarity and structure score
+        clarity_score = self._score_clarity(answer)
+        
+        # Weighted final score
+        weights = rubric["weights"]
+        final_score = (
+            technical_score * weights["technical"] +
+            depth_score * weights["depth"] +
+            methodology_score * weights["methodology"] +
+            clarity_score * weights["clarity"]
+        ) * 10  # Scale to 10
+        
+        # Generate feedback and suggestions
+        feedback, suggestions = self._generate_feedback(
+            technical_score, depth_score, methodology_score, clarity_score, word_count
+        )
+        
+        return {
+            "score": round(final_score, 1),
+            "breakdown": {
+                "technical": round(technical_score * 10, 1),
+                "depth": round(depth_score * 10, 1),
+                "methodology": round(methodology_score * 10, 1),
+                "clarity": round(clarity_score * 10, 1)
+            },
+            "feedback": feedback,
+            "suggestions": suggestions,
+            "word_count": word_count
+        }
+    
+    def _score_technical_content(self, answer_lower, rubric):
+        """Score technical term usage"""
+        tech_terms = sum(1 for term in rubric["technical_terms"] if term in answer_lower)
+        advanced_terms = sum(1 for term in rubric["advanced_terms"] if term in answer_lower)
+        
+        # Normalize scores
+        tech_score = min(tech_terms / 3, 1.0)  # Up to 3 technical terms = full score
+        advanced_score = min(advanced_terms / 2, 0.5)  # Up to 2 advanced terms = bonus
+        
+        return min(tech_score + advanced_score, 1.0)
+    
+    def _score_depth(self, answer, word_count):
+        """Score depth and detail level"""
+        # Word count component
+        word_score = min(word_count / 100, 0.7)  # 100+ words = 70% of depth score
+        
+        # Structure indicators
+        has_examples = any(marker in answer.lower() for marker in ['example', 'for instance', 'such as'])
+        has_numbers = bool(re.search(r'\d+', answer))
+        has_comparisons = any(marker in answer.lower() for marker in ['compare', 'versus', 'vs', 'better', 'worse'])
+        
+        structure_score = (has_examples * 0.1) + (has_numbers * 0.1) + (has_comparisons * 0.1)
+        
+        return min(word_score + structure_score, 1.0)
+    
+    def _score_methodology(self, answer_lower, rubric):
+        """Score methodology and approach"""
+        method_terms = sum(1 for term in rubric["methodology_terms"] if term in answer_lower)
+        
+        # Look for step-by-step approach
+        has_steps = any(marker in answer_lower for marker in ['step', 'first', 'second', 'then', 'next', 'finally'])
+        has_process = any(marker in answer_lower for marker in ['process', 'flow', 'procedure', 'approach'])
+        
+        method_score = min(method_terms / 2, 0.7)  # Up to 2 methodology terms
+        process_score = (has_steps * 0.15) + (has_process * 0.15)
+        
+        return min(method_score + process_score, 1.0)
+    
+    def _score_clarity(self, answer):
+        """Score clarity and organization"""
+        sentences = answer.split('.')
+        avg_sentence_length = sum(len(s.split()) for s in sentences) / max(len(sentences), 1)
+        
+        # Prefer moderate sentence length (10-25 words)
+        length_score = 1.0 - abs(avg_sentence_length - 17.5) / 17.5
+        length_score = max(0, min(length_score, 1.0))
+        
+        # Check for organization markers
+        has_organization = any(marker in answer.lower() for marker in [':', '-', '1.', '2.', 'bullet'])
+        org_score = 0.3 if has_organization else 0
+        
+        return min(length_score * 0.7 + org_score, 1.0)
+    
+    def _generate_feedback(self, tech_score, depth_score, method_score, clarity_score, word_count):
+        """Generate detailed feedback and suggestions"""
+        feedback_parts = []
+        suggestions = []
+        
+        if tech_score >= 0.8:
+            feedback_parts.append("Strong technical knowledge demonstrated")
+        elif tech_score >= 0.6:
+            feedback_parts.append("Good technical understanding shown")
+            suggestions.append("Include more specific technical terminology")
+        else:
+            feedback_parts.append("Limited technical content")
+            suggestions.append("Use more industry-specific technical terms")
+        
+        if depth_score >= 0.8:
+            feedback_parts.append("comprehensive analysis provided")
+        elif depth_score >= 0.6:
+            feedback_parts.append("adequate detail level")
+            suggestions.append("Provide more detailed explanations and examples")
+        else:
+            feedback_parts.append("needs more depth")
+            suggestions.append("Expand with specific examples and quantitative details")
+        
+        if method_score >= 0.7:
+            feedback_parts.append("clear methodology described")
+        else:
+            feedback_parts.append("methodology could be clearer")
+            suggestions.append("Describe step-by-step approach or process")
+        
+        if word_count < 50:
+            suggestions.append("Increase answer length for better coverage")
+        elif word_count > 300:
+            suggestions.append("Consider more concise explanations")
+        
+        feedback = ", ".join(feedback_parts).capitalize() + f" ({word_count} words)"
+        
+        return feedback, suggestions
+
+# Initialize components
+DatabaseManager.init_db()
+question_generator = SmartQuestionGenerator()
+scoring_system = EnhancedScoringSystem()
+
+# User authentication functions
 def hash_pass(pwd):
     return hashlib.sha256(pwd.encode()).hexdigest()
 
@@ -20,204 +481,52 @@ def check_pass(hashed, pwd):
     return hashed == hashlib.sha256(pwd.encode()).hexdigest()
 
 def init_data():
-    global users
-    users['admin'] = {
-        'id': 'admin',
-        'username': 'admin',
-        'password': hash_pass('Vibhuaya@3006'),
-        'is_admin': True,
-        'exp': 5
-    }
+    """Initialize demo data"""
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
     
-    # 18 Individual Engineers
-    engineer_data = [
-        ('eng001', 'Kranthi'),
-        ('eng002', 'Neela'),
-        ('eng003', 'Bhanu'),
-        ('eng004', 'Lokeshwari'),
-        ('eng005', 'Nagesh'),
-        ('eng006', 'VJ'),
-        ('eng007', 'Pravalika'),
-        ('eng008', 'Daniel'),
-        ('eng009', 'Karthik'),
-        ('eng010', 'Hema'),
-        ('eng011', 'Naveen'),
-        ('eng012', 'Srinivas'),
-        ('eng013', 'Meera'),
-        ('eng014', 'Suraj'),
-        ('eng015', 'Akhil'),
-        ('eng016', 'Vikas'),
-        ('eng017', 'Sahith'),
-        ('eng018', 'Sravan')
-    ]
+    # Check if admin exists
+    c.execute('SELECT id FROM users WHERE id = ?', ('admin',))
+    if not c.fetchone():
+        # Create admin
+        c.execute("""
+            INSERT INTO users (id, username, display_name, email, password, is_admin, experience, created_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, ('admin', 'admin', 'System Administrator', 'admin@vibhuayu.com', 
+              hash_pass('Vibhuaya@3006'), 1, 5, datetime.now().isoformat()))
+        
+        # Create 18 engineers
+        engineer_data = [
+            ('eng001', 'Kranthi', 'kranthi@vibhuayu.com', 3),
+            ('eng002', 'Neela', 'neela@vibhuayu.com', 4),
+            ('eng003', 'Bhanu', 'bhanu@vibhuayu.com', 2),
+            ('eng004', 'Lokeshwari', 'lokeshwari@vibhuayu.com', 5),
+            ('eng005', 'Nagesh', 'nagesh@vibhuayu.com', 3),
+            ('eng006', 'VJ', 'vj@vibhuayu.com', 4),
+            ('eng007', 'Pravalika', 'pravalika@vibhuayu.com', 2),
+            ('eng008', 'Daniel', 'daniel@vibhuayu.com', 6),
+            ('eng009', 'Karthik', 'karthik@vibhuayu.com', 3),
+            ('eng010', 'Hema', 'hema@vibhuayu.com', 4),
+            ('eng011', 'Naveen', 'naveen@vibhuayu.com', 5),
+            ('eng012', 'Srinivas', 'srinivas@vibhuayu.com', 3),
+            ('eng013', 'Meera', 'meera@vibhuayu.com', 2),
+            ('eng014', 'Suraj', 'suraj@vibhuayu.com', 4),
+            ('eng015', 'Akhil', 'akhil@vibhuayu.com', 3),
+            ('eng016', 'Vikas', 'vikas@vibhuayu.com', 5),
+            ('eng017', 'Sahith', 'sahith@vibhuayu.com', 2),
+            ('eng018', 'Sravan', 'sravan@vibhuayu.com', 4)
+        ]
+        
+        for uid, name, email, exp in engineer_data:
+            c.execute("""
+                INSERT INTO users (id, username, display_name, email, password, is_admin, experience, department, created_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (uid, uid, name, email, hash_pass('password123'), 0, exp, 'Physical Design', datetime.now().isoformat()))
     
-    for uid, display_name in engineer_data:
-        users[uid] = {
-            'id': uid,
-            'username': uid,
-            'display_name': display_name,
-            'password': hash_pass('password123'),
-            'is_admin': False,
-            'exp': 3 + (int(uid[-2:]) % 4)
-        }
+    conn.commit()
+    conn.close()
 
-# Simple Questions - 18 per topic (2+ Experience Level)
-QUESTIONS = {
-    "sta": [
-        "What is Static Timing Analysis (STA)? Why is it important in chip design?",
-        "Explain setup time and hold time. What happens when these requirements are violated?",
-        "What is slack? How do you calculate setup slack and hold slack?",
-        "Your design has setup violations of -30ps. List 3 methods to fix these violations.",
-        "What is clock skew? How does it affect setup and hold timing?",
-        "Explain timing corners. Which corners do you use for setup and hold analysis?",
-        "What are timing exceptions? When would you use false paths?",
-        "Describe the difference between ideal clock and propagated clock analysis.",
-        "What is clock jitter? How do you account for it in timing calculations?",
-        "Your hold violations are at 25ps. What are the common ways to fix hold violations?",
-        "What is OCV (On-Chip Variation)? Why do you add OCV margins in STA?",
-        "Explain multicycle paths. Give an example where you would use them.",
-        "How do you analyze timing for multiple clock domains?",
-        "What is clock domain crossing (CDC)? What timing checks are needed?",
-        "Describe timing analysis for memory interfaces (SRAM). What makes it different?",
-        "What reports do you check for timing signoff? List the key timing reports.",
-        "How do you handle timing analysis for generated clocks?",
-        "What is timing correlation? How do you ensure STA matches real silicon performance?"
-    ],
-    
-    "cts": [
-        "What is Clock Tree Synthesis (CTS)? Why do we build clock trees?",
-        "What is clock skew? What is an acceptable skew target for most designs?",
-        "Explain clock insertion delay. How is it different from clock skew?",
-        "Your clock tree has 150ps skew but target is 50ps. How would you reduce it?",
-        "What elements are used to build clock trees? Describe buffers and inverters.",
-        "What is clock tree balancing? How do you achieve balanced insertion delay?",
-        "What is useful skew? Give an example where you would use it intentionally.",
-        "How do clock gating cells affect your clock tree? Where do you place them?",
-        "Compare H-tree vs balanced tree topologies. When would you use each?",
-        "Your design has 3 clock domains. How do you handle multiple clocks in CTS?",
-        "What techniques can you use to reduce clock tree power consumption?",
-        "How do you build clock trees when you have multiple voltage domains?",
-        "What is clock mesh? When would you choose mesh over tree topology?",
-        "Describe CTS challenges for high-frequency designs (>1GHz).",
-        "How do you handle CTS for designs with power gating?",
-        "What is the typical flow sequence? When does CTS happen relative to placement and routing?",
-        "How do you optimize clock trees for process variation and yield?",
-        "What reports do you check after CTS? How do you verify clock tree quality?"
-    ],
-    
-    "signoff": [
-        "What is signoff in chip design? What must pass before tape-out?",
-        "List 5 major signoff checks. Why is each one important?",
-        "What is DRC (Design Rule Check)? Give 3 examples of common DRC violations.",
-        "What is LVS (Layout vs Schematic)? What does an LVS mismatch mean?",
-        "Your design has 20 LVS errors. What systematic approach would you use to debug them?",
-        "What is antenna checking? Why can antenna violations damage your chip?",
-        "Explain metal density rules. What happens if density is too low?",
-        "What is IR drop analysis? What are typical IR drop limits?",
-        "Your design has IR drop violations of 120mV. How would you fix them?",
-        "What is electromigration (EM)? How do you prevent EM violations?",
-        "Describe timing signoff. What timing reports are required?",
-        "What is signal integrity (SI) analysis? What SI effects do you check?",
-        "How do you perform power analysis for signoff? What power metrics matter?",
-        "What additional checks are needed for multi-voltage designs?",
-        "What is formal verification? How is it different from simulation?",
-        "Explain thermal analysis. How do you ensure your chip won't overheat?",
-        "What is yield analysis? How do you optimize for manufacturing yield?",
-        "Describe the typical signoff flow. Who signs off on what?"
-    ]
-}
-
-def analyze_answer_quality(question, answer, topic):
-    """Analyzes answer quality and suggests a score"""
-    if not answer or len(answer.strip()) < 20:
-        return 0, "Answer too short or empty"
-    
-    answer_lower = answer.lower()
-    
-    # Define scoring criteria for each topic
-    scoring_criteria = {
-        'sta': {
-            'excellent_terms': ['setup time', 'hold time', 'slack', 'timing violation', 'clock skew', 'timing corner', 'propagated clock', 'jitter', 'ocv'],
-            'good_terms': ['timing', 'clock', 'delay', 'path', 'constraint', 'analysis', 'signoff', 'violation'],
-            'methodology_terms': ['systematic', 'approach', 'method', 'technique', 'optimization', 'analysis']
-        },
-        'cts': {
-            'excellent_terms': ['clock tree', 'skew', 'insertion delay', 'balancing', 'useful skew', 'clock gating', 'h-tree', 'clock mesh', 'power optimization'],
-            'good_terms': ['clock', 'tree', 'buffer', 'delay', 'synthesis', 'distribution', 'domain', 'topology'],
-            'methodology_terms': ['optimization', 'technique', 'approach', 'method', 'strategy', 'implementation']
-        },
-        'signoff': {
-            'excellent_terms': ['drc', 'lvs', 'antenna', 'ir drop', 'electromigration', 'metal density', 'signal integrity', 'formal verification'],
-            'good_terms': ['signoff', 'verification', 'check', 'violation', 'analysis', 'tape-out', 'design rule'],
-            'methodology_terms': ['systematic', 'debug', 'approach', 'method', 'flow', 'process']
-        }
-    }
-    
-    criteria = scoring_criteria.get(topic, scoring_criteria['sta'])
-    
-    # Count relevant technical terms
-    excellent_count = sum(1 for term in criteria['excellent_terms'] if term in answer_lower)
-    good_count = sum(1 for term in criteria['good_terms'] if term in answer_lower)
-    methodology_count = sum(1 for term in criteria['methodology_terms'] if term in answer_lower)
-    
-    # Calculate base score
-    word_count = len(answer.split())
-    has_structure = any(marker in answer_lower for marker in ['1.', '2.', 'first', 'second', 'step'])
-    
-    # Scoring logic
-    if excellent_count >= 3 and word_count >= 80:
-        base_score = 8
-        reasoning = f"Strong technical content ({excellent_count} advanced terms)"
-    elif excellent_count >= 2 and word_count >= 50:
-        base_score = 7
-        reasoning = f"Good technical knowledge ({excellent_count} advanced terms)"
-    elif excellent_count >= 1 or good_count >= 3:
-        base_score = 6
-        reasoning = f"Adequate technical understanding"
-    elif good_count >= 2 and word_count >= 30:
-        base_score = 5
-        reasoning = f"Basic technical knowledge"
-    else:
-        base_score = 4
-        reasoning = "Limited technical content"
-    
-    # Bonus points
-    if methodology_count >= 1:
-        base_score += 1
-        reasoning += " + methodology"
-    if has_structure:
-        base_score += 0.5
-        reasoning += " + structured"
-    
-    final_score = min(10, round(base_score))
-    reasoning += f" ({word_count} words)"
-    
-    return final_score, reasoning
-
-def create_test(eng_id, topic):
-    global counter
-    counter += 1
-    test_id = f"PD_{topic}_{eng_id}_{counter}"
-    
-    # Each engineer gets all 18 questions from their topic
-    selected_questions = QUESTIONS[topic]
-    
-    test = {
-        'id': test_id,
-        'engineer_id': eng_id,
-        'topic': topic,
-        'questions': selected_questions,
-        'answers': {},
-        'status': 'pending',
-        'created': datetime.now().isoformat(),
-        'due': (datetime.now() + timedelta(days=3)).isoformat(),
-        'score': None,
-        'auto_scores': {}
-    }
-    
-    assignments[test_id] = test
-    return test
-
+# Routes
 @app.route('/')
 def home():
     if 'user_id' in session:
@@ -228,7 +537,7 @@ def home():
 
 @app.route('/health')
 def health():
-    return 'OK'
+    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -236,772 +545,822 @@ def login():
         username = request.form.get('username', '').strip()
         password = request.form.get('password', '').strip()
         
-        user = users.get(username)
-        if user and check_pass(user['password'], password):
-            session['user_id'] = user['id']
-            session['username'] = user['username']
-            session['is_admin'] = user.get('is_admin', False)
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        c.execute('SELECT * FROM users WHERE username = ?', (username,))
+        user = c.fetchone()
+        conn.close()
+        
+        if user and check_pass(user[4], password):  # password is at index 4
+            session['user_id'] = user[0]
+            session['username'] = user[1]
+            session['display_name'] = user[2]
+            session['is_admin'] = bool(user[5])
+            session['theme'] = user[10] if user[10] else 'light'
             
-            if user.get('is_admin'):
+            # Update last login
+            conn = sqlite3.connect(DATABASE)
+            c = conn.cursor()
+            c.execute('UPDATE users SET last_login = ? WHERE id = ?', 
+                     (datetime.now().isoformat(), user[0]))
+            conn.commit()
+            conn.close()
+            
+            # Log analytics
+            DatabaseManager.log_analytics('login', user[0])
+            
+            if bool(user[5]):  # is_admin
                 return redirect('/admin')
             return redirect('/student')
     
-    return '''
+    # Enhanced login page with theme toggle
+    return render_template_string("""
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Vibhuayu Technologies - PD Assessment</title>
+    <title>Vibhuayu Technologies - Enhanced PD Assessment</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
+        :root {
+            --primary-color: #667eea;
+            --secondary-color: #764ba2;
+            --success-color: #10b981;
+            --warning-color: #f59e0b;
+            --error-color: #ef4444;
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --surface: rgba(255, 255, 255, 0.98);
+            --border: #e2e8f0;
+        }
+        
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        
         body { 
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            background: linear-gradient(135deg, #0f0f23 0%, #1a1a2e 50%, #16213e 100%); 
+            background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%); 
             min-height: 100vh; 
             display: flex; 
             align-items: center; 
             justify-content: center; 
+            position: relative;
+            overflow-x: hidden;
         }
+        
+        body::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: 
+                radial-gradient(circle at 30% 40%, rgba(102, 126, 234, 0.3) 0%, transparent 50%),
+                radial-gradient(circle at 80% 80%, rgba(118, 75, 162, 0.15) 0%, transparent 50%);
+            z-index: 1;
+        }
+        
         .container {
-            background: rgba(255, 255, 255, 0.98);
+            position: relative; z-index: 2;
+            background: var(--surface);
+            backdrop-filter: blur(20px);
             border-radius: 24px;
             padding: 50px 40px;
-            width: 450px;
+            width: min(450px, 90vw);
             box-shadow: 0 25px 50px rgba(0, 0, 0, 0.25);
+            border: 1px solid rgba(255, 255, 255, 0.1);
         }
-        .logo {
-            width: 80px;
-            height: 80px;
-            margin: 0 auto 20px;
-            background: linear-gradient(135deg, #2563eb, #7c3aed, #db2777);
-            border-radius: 20px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            font-size: 36px;
-            font-weight: 900;
-        }
-        .title {
-            font-size: 28px;
-            font-weight: 700;
-            text-align: center;
-            margin-bottom: 8px;
-        }
-        .subtitle {
-            color: #64748b;
-            font-size: 16px;
+        
+        .logo-section {
             text-align: center;
             margin-bottom: 35px;
         }
+        
+        .logo {
+            width: 80px; height: 80px;
+            margin: 0 auto 20px;
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            border-radius: 20px;
+            display: flex; align-items: center; justify-content: center;
+            color: white; font-size: 36px; font-weight: 900;
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.3);
+            position: relative; overflow: hidden;
+        }
+        
+        .logo::before {
+            content: ''; position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: linear-gradient(45deg, transparent 30%, rgba(255,255,255,0.1) 50%, transparent 70%);
+            transform: translateX(-100%);
+            animation: shine 3s infinite;
+        }
+        
+        @keyframes shine {
+            0% { transform: translateX(-100%); }
+            50% { transform: translateX(100%); }
+            100% { transform: translateX(100%); }
+        }
+        
+        .title {
+            font-size: 28px; font-weight: 700;
+            background: linear-gradient(135deg, #1e293b, #475569);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+            margin-bottom: 8px;
+        }
+        
+        .subtitle {
+            color: #64748b; font-size: 16px; font-weight: 500;
+            margin-bottom: 35px;
+        }
+        
         .form-group {
             margin-bottom: 24px;
         }
+        
         .form-group label {
-            display: block;
-            margin-bottom: 8px;
-            color: #374151;
-            font-weight: 600;
+            display: block; margin-bottom: 8px;
+            color: #374151; font-weight: 600; font-size: 14px;
         }
+        
         .form-input {
-            width: 100%;
-            padding: 16px 20px;
-            border: 2px solid #e5e7eb;
-            border-radius: 12px;
-            font-size: 16px;
+            width: 100%; padding: 16px 20px;
+            border: 2px solid var(--border);
+            border-radius: 12px; font-size: 16px;
+            transition: all 0.3s ease;
+            background: rgba(255, 255, 255, 0.8);
         }
+        
         .form-input:focus {
-            outline: none;
-            border-color: #3b82f6;
-        }
-        .login-btn {
-            width: 100%;
-            padding: 16px;
-            background: linear-gradient(135deg, #3b82f6, #1d4ed8);
-            color: white;
-            border: none;
-            border-radius: 12px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            margin-bottom: 30px;
-        }
-        .info-card {
-            background: #f8fafc;
-            border-radius: 16px;
-            padding: 24px;
-            text-align: center;
-        }
-        .credentials {
+            outline: none; border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
             background: white;
-            border-radius: 8px;
-            padding: 12px;
-            margin: 12px 0;
-            border-left: 4px solid #3b82f6;
         }
-        .eng-list {
-            font-size: 12px;
-            color: #64748b;
+        
+        .login-btn {
+            width: 100%; padding: 16px;
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            color: white; border: none; border-radius: 12px;
+            font-size: 16px; font-weight: 600; cursor: pointer;
+            transition: all 0.3s ease; margin-bottom: 30px;
+        }
+        
+        .login-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.4);
+        }
+        
+        .info-card {
+            background: linear-gradient(135deg, #f8fafc, #f1f5f9);
+            border: 1px solid var(--border);
+            border-radius: 16px; padding: 24px; text-align: center;
+        }
+        
+        .credentials {
+            background: white; border-radius: 8px; padding: 12px;
+            margin: 12px 0; border-left: 4px solid var(--primary-color);
+        }
+        
+        .feature-highlights {
+            margin-top: 15px; font-size: 12px; color: #64748b;
             line-height: 1.6;
-            margin-top: 12px;
+        }
+        
+        .new-badge {
+            background: var(--success-color); color: white;
+            padding: 2px 6px; border-radius: 10px;
+            font-size: 10px; font-weight: 600; margin-left: 5px;
+        }
+        
+        @media (max-width: 480px) {
+            .container { padding: 30px 20px; }
+            .title { font-size: 24px; }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="logo">V7</div>
-        <div class="title">PD Assessment Portal</div>
-        <div class="subtitle">Physical Design Evaluation System</div>
+        <div class="logo-section">
+            <div class="logo">V7</div>
+            <div class="title">Enhanced PD Portal</div>
+            <div class="subtitle">Advanced Assessment & Analytics System</div>
+        </div>
         
         <form method="POST">
             <div class="form-group">
                 <label>Username</label>
-                <input type="text" name="username" class="form-input" placeholder="Enter your username" required>
+                <input type="text" name="username" class="form-input" 
+                       placeholder="Enter your username" required autocomplete="username">
             </div>
             <div class="form-group">
                 <label>Password</label>
-                <input type="password" name="password" class="form-input" placeholder="Enter your password" required>
+                <input type="password" name="password" class="form-input" 
+                       placeholder="Enter your password" required autocomplete="current-password">
             </div>
-            <button type="submit" class="login-btn">Access Assessment Portal</button>
+            <button type="submit" class="login-btn">Access Enhanced Portal</button>
         </form>
         
         <div class="info-card">
-            <div style="font-weight: 700; margin-bottom: 16px;">🔐 Test Credentials</div>
+            <div style="font-weight: 700; margin-bottom: 16px;">🔐 Demo Credentials</div>
             <div class="credentials">
                 <strong>Engineers:</strong> eng001 through eng018<br>
-                <strong>Password:</strong> password123
+                <strong>Password:</strong> password123<br>
+                <strong>Admin:</strong> admin / Vibhuaya@3006
             </div>
-            <div class="eng-list">
-                <strong>18 Engineers:</strong><br>
-                Kranthi • Neela • Bhanu • Lokeshwari • Nagesh • VJ<br>
-                Pravalika • Daniel • Karthik • Hema • Naveen • Srinivas<br>
-                Meera • Suraj • Akhil • Vikas • Sahith • Sravan
+            <div class="feature-highlights">
+                <strong>🚀 New Features:</strong><br>
+                Smart Question Generation <span class="new-badge">NEW</span><br>
+                Enhanced AI Scoring <span class="new-badge">NEW</span><br>
+                Performance Analytics <span class="new-badge">NEW</span><br>
+                Mobile-Responsive Design <span class="new-badge">NEW</span>
             </div>
         </div>
     </div>
 </body>
-</html>'''
+</html>""")
 
-@app.route('/logout')
-def logout():
-    session.clear()
-    return redirect('/login')
-
+# Enhanced Admin Dashboard with Analytics
 @app.route('/admin')
 def admin():
     if not session.get('is_admin'):
         return redirect('/login')
     
-    engineers = [u for u in users.values() if not u.get('is_admin')]
-    all_tests = list(assignments.values())
-    pending = [a for a in all_tests if a['status'] == 'submitted']
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
     
+    # Get comprehensive statistics
+    c.execute('SELECT COUNT(*) FROM users WHERE is_admin = 0')
+    total_engineers = c.fetchone()[0]
+    
+    c.execute('SELECT COUNT(*) FROM assignments')
+    total_assignments = c.fetchone()[0]
+    
+    c.execute('SELECT COUNT(*) FROM submissions WHERE status = "submitted"')
+    pending_reviews = c.fetchone()[0]
+    
+    c.execute('SELECT COUNT(*) FROM submissions WHERE status = "graded"')
+    completed_reviews = c.fetchone()[0]
+    
+    # Get engineers for dropdown
+    c.execute('SELECT * FROM users WHERE is_admin = 0 ORDER BY display_name')
+    engineers = c.fetchall()
+    
+    # Get recent activity
+    c.execute('''
+        SELECT s.*, a.topic, u.display_name, a.created_date as assignment_date
+        FROM submissions s
+        JOIN assignments a ON s.assignment_id = a.id
+        JOIN users u ON s.engineer_id = u.id
+        WHERE s.status = "submitted"
+        ORDER BY s.submitted_date DESC
+        LIMIT 10
+    ''')
+    pending_submissions = c.fetchall()
+    
+    # Get performance analytics
+    c.execute('''
+        SELECT 
+            topic,
+            COUNT(*) as count,
+            AVG(CAST(total_score as FLOAT)) as avg_score,
+            MAX(CAST(total_score as FLOAT)) as max_score,
+            MIN(CAST(total_score as FLOAT)) as min_score
+        FROM submissions s
+        JOIN assignments a ON s.assignment_id = a.id
+        WHERE s.status = "graded" AND s.total_score > 0
+        GROUP BY topic
+    ''')
+    topic_stats = c.fetchall()
+    
+    conn.close()
+    
+    # Build engineer options
     eng_options = ''
     for eng in engineers:
-        display_name = eng.get('display_name', eng['username'])
-        eng_options += f'<option value="{eng["id"]}">{display_name} (2+ Experience)</option>'
+        exp_years = eng[6] if eng[6] else 3
+        eng_options += f'<option value="{eng[0]}" data-exp="{exp_years}">{eng[2]} ({exp_years}y exp)</option>'
     
-    return f'''
+    # Build pending submissions HTML
+    pending_html = ''
+    for sub in pending_submissions:
+        time_ago = _time_ago(sub[4])  # submitted_date
+        pending_html += f'''
+        <div class="submission-card">
+            <div class="submission-header">
+                <h4>{sub[11]} - {sub[10].upper()}</h4>
+                <span class="time-badge">{time_ago}</span>
+            </div>
+            <div class="submission-meta">
+                📝 {len(json.loads(sub[3]))} answers | 🎯 Auto-scored | ⏰ {sub[4][:16]}
+            </div>
+            <div class="submission-actions">
+                <a href="/admin/review/{sub[1]}" class="review-btn">Review & Grade</a>
+                <a href="/admin/quick-view/{sub[1]}" class="quick-btn">Quick View</a>
+            </div>
+        </div>'''
+    
+    if not pending_html:
+        pending_html = '''
+        <div class="no-submissions">
+            <div class="empty-icon">📭</div>
+            <h3>All Caught Up!</h3>
+            <p>No pending submissions to review. Great work!</p>
+        </div>'''
+    
+    # Build analytics charts data
+    analytics_data = {
+        "topic_stats": [{"topic": stat[0], "count": stat[1], "avg_score": round(stat[2], 1)} for stat in topic_stats],
+        "total_engineers": total_engineers,
+        "completion_rate": round((completed_reviews / max(total_assignments, 1)) * 100, 1)
+    }
+    
+    return render_template_string("""
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Admin Dashboard</title>
+    <title>Enhanced Admin Dashboard - Vibhuayu</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body {{ font-family: Arial; background: #f5f5f5; margin: 0; }}
-        .header {{ background: #2563eb; color: white; padding: 20px; }}
-        .container {{ max-width: 1200px; margin: 20px auto; padding: 0 20px; }}
-        .card {{ background: white; border-radius: 12px; padding: 30px; margin: 20px 0; }}
-        .stats {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; }}
-        .stat {{ background: white; padding: 20px; border-radius: 12px; text-align: center; }}
-        .stat-num {{ font-size: 24px; font-weight: bold; color: #2563eb; }}
-        select, button {{ padding: 12px; border: 1px solid #ddd; border-radius: 6px; margin: 5px; }}
-        .btn-primary {{ background: #2563eb; color: white; border: none; cursor: pointer; }}
+        :root {
+            --primary: #667eea;
+            --secondary: #764ba2;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --error: #ef4444;
+            --bg-dark: #0f172a;
+            --bg-light: #1e293b;
+            --surface: #ffffff;
+            --text-primary: #1e293b;
+            --text-secondary: #64748b;
+            --border: #e2e8f0;
+        }
+        
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, var(--bg-dark) 0%, var(--bg-light) 100%);
+            min-height: 100vh; color: var(--text-primary);
+        }
+        
+        .header {
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            padding: 20px 0; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+            position: relative; overflow: hidden;
+        }
+        
+        .header::before {
+            content: ''; position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: linear-gradient(45deg, transparent 30%, rgba(255,255,255,0.1) 50%, transparent 70%);
+            transform: translateX(-100%);
+            animation: headerShine 4s infinite;
+        }
+        
+        @keyframes headerShine {
+            0% { transform: translateX(-100%); }
+            50% { transform: translateX(100%); }
+            100% { transform: translateX(100%); }
+        }
+        
+        .header-content {
+            max-width: 1400px; margin: 0 auto; padding: 0 20px;
+            display: flex; align-items: center; justify-content: space-between;
+            position: relative; z-index: 2;
+        }
+        
+        .header-title {
+            display: flex; align-items: center; gap: 15px;
+        }
+        
+        .header-logo {
+            width: 50px; height: 50px;
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 12px; display: flex; align-items: center; justify-content: center;
+            font-weight: 900; color: white; font-size: 20px;
+            backdrop-filter: blur(10px);
+        }
+        
+        .header h1 {
+            color: white; font-size: 28px; font-weight: 700;
+            text-shadow: 0 2px 10px rgba(0,0,0,0.3);
+        }
+        
+        .nav-menu {
+            display: flex; gap: 15px; align-items: center;
+        }
+        
+        .nav-btn {
+            background: rgba(255, 255, 255, 0.15); color: white;
+            padding: 10px 15px; text-decoration: none; border-radius: 8px;
+            backdrop-filter: blur(10px); transition: all 0.3s ease;
+            font-weight: 600; font-size: 14px;
+        }
+        
+        .nav-btn:hover {
+            background: rgba(255, 255, 255, 0.25);
+            transform: translateY(-2px);
+        }
+        
+        .container {
+            max-width: 1400px; margin: 30px auto; padding: 0 20px;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 25px; margin-bottom: 40px;
+        }
+        
+        .stat-card {
+            background: linear-gradient(135deg, var(--surface) 0%, #f8fafc 100%);
+            padding: 30px; border-radius: 20px; text-align: center;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            transition: transform 0.3s ease;
+        }
+        
+        .stat-card:hover { transform: translateY(-5px); }
+        
+        .stat-number {
+            font-size: 42px; font-weight: 800;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+            margin-bottom: 8px; line-height: 1;
+        }
+        
+        .stat-label {
+            color: var(--text-secondary); font-weight: 600;
+            font-size: 14px; text-transform: uppercase; letter-spacing: 1px;
+        }
+        
+        .stat-trend {
+            margin-top: 10px; font-size: 12px; font-weight: 600;
+        }
+        
+        .trend-up { color: var(--success); }
+        .trend-down { color: var(--error); }
+        
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+        }
+        
+        .card {
+            background: linear-gradient(135deg, var(--surface) 0%, #f8fafc 100%);
+            border-radius: 20px; padding: 30px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .card h2 {
+            color: var(--text-primary); margin-bottom: 25px;
+            font-size: 24px; font-weight: 700;
+            display: flex; align-items: center; gap: 10px;
+        }
+        
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr auto;
+            gap: 15px; align-items: end;
+        }
+        
+        .form-group {
+            display: flex; flex-direction: column;
+        }
+        
+        .form-group label {
+            margin-bottom: 8px; font-weight: 600;
+            color: var(--text-primary); font-size: 14px;
+        }
+        
+        select, button {
+            padding: 14px 18px; border: 2px solid var(--border);
+            border-radius: 12px; font-size: 16px;
+            transition: all 0.3s ease; background: white;
+            font-family: inherit;
+        }
+        
+        select:focus {
+            outline: none; border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            color: white; border: none; cursor: pointer;
+            font-weight: 600; min-width: 140px;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.4);
+        }
+        
+        .submission-card {
+            background: linear-gradient(135deg, #f8fafc, #f1f5f9);
+            padding: 20px; margin: 15px 0; border-radius: 16px;
+            border-left: 4px solid var(--warning);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+            transition: all 0.3s ease;
+        }
+        
+        .submission-card:hover {
+            transform: translateX(5px);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1);
+        }
+        
+        .submission-header {
+            display: flex; justify-content: space-between;
+            align-items: center; margin-bottom: 10px;
+        }
+        
+        .submission-header h4 {
+            color: var(--text-primary); margin: 0; font-size: 16px;
+        }
+        
+        .time-badge {
+            background: var(--warning); color: white;
+            padding: 4px 12px; border-radius: 20px;
+            font-size: 12px; font-weight: 600;
+        }
+        
+        .submission-meta {
+            color: var(--text-secondary); font-size: 14px;
+            margin-bottom: 15px;
+        }
+        
+        .submission-actions {
+            display: flex; gap: 10px;
+        }
+        
+        .review-btn, .quick-btn {
+            padding: 8px 16px; text-decoration: none;
+            border-radius: 8px; font-weight: 600;
+            font-size: 14px; transition: all 0.3s ease;
+        }
+        
+        .review-btn {
+            background: linear-gradient(135deg, var(--success), #059669);
+            color: white;
+        }
+        
+        .quick-btn {
+            background: rgba(102, 126, 234, 0.1);
+            color: var(--primary);
+        }
+        
+        .review-btn:hover, .quick-btn:hover {
+            transform: translateY(-2px);
+        }
+        
+        .no-submissions {
+            text-align: center; padding: 60px 20px;
+            color: var(--text-secondary);
+        }
+        
+        .empty-icon {
+            font-size: 48px; margin-bottom: 20px;
+        }
+        
+        .analytics-preview {
+            background: linear-gradient(135deg, #f0f9ff, #e0f2fe);
+            border-radius: 12px; padding: 20px;
+            margin-top: 20px;
+        }
+        
+        .analytics-item {
+            display: flex; justify-content: space-between;
+            align-items: center; padding: 10px 0;
+            border-bottom: 1px solid rgba(102, 126, 234, 0.1);
+        }
+        
+        .analytics-item:last-child { border-bottom: none; }
+        
+        .topic-badge {
+            background: var(--primary); color: white;
+            padding: 4px 12px; border-radius: 20px;
+            font-size: 12px; font-weight: 600;
+            text-transform: uppercase;
+        }
+        
+        @media (max-width: 768px) {
+            .main-grid { grid-template-columns: 1fr; }
+            .form-row { grid-template-columns: 1fr; gap: 15px; }
+            .stats-grid { grid-template-columns: repeat(2, 1fr); }
+            .header-content { flex-direction: column; gap: 15px; text-align: center; }
+            .nav-menu { flex-wrap: wrap; justify-content: center; }
+        }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>Admin Dashboard</h1>
-        <a href="/logout" style="color: white; float: right;">Logout</a>
+        <div class="header-content">
+            <div class="header-title">
+                <div class="header-logo">V7</div>
+                <h1>🚀 Enhanced Admin Dashboard</h1>
+            </div>
+            <div class="nav-menu">
+                <a href="/admin/analytics" class="nav-btn">📊 Analytics</a>
+                <a href="/admin/bulk-create" class="nav-btn">⚡ Bulk Create</a>
+                <a href="/logout" class="nav-btn">🚪 Logout</a>
+            </div>
+        </div>
     </div>
     
     <div class="container">
-        <div class="stats">
-            <div class="stat"><div class="stat-num">{len(engineers)}</div><div>Engineers</div></div>
-            <div class="stat"><div class="stat-num">{len(all_tests)}</div><div>Tests</div></div>
-            <div class="stat"><div class="stat-num">{len(pending)}</div><div>Pending</div></div>
-            <div class="stat"><div class="stat-num">54</div><div>Questions</div></div>
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-number">{{ total_engineers }}</div>
+                <div class="stat-label">Engineers</div>
+                <div class="stat-trend trend-up">↗ Active Users</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{{ total_assignments }}</div>
+                <div class="stat-label">Assessments</div>
+                <div class="stat-trend trend-up">📈 Total Created</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{{ pending_reviews }}</div>
+                <div class="stat-label">Pending Reviews</div>
+                <div class="stat-trend trend-up">⏳ Need Attention</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{{ analytics_data.completion_rate }}%</div>
+                <div class="stat-label">Completion Rate</div>
+                <div class="stat-trend trend-up">✅ Success Rate</div>
+            </div>
         </div>
         
-        <div class="card">
-            <h2>Create Assessment</h2>
-            <form method="POST" action="/admin/create">
-                <select name="engineer_id" required>
-                    <option value="">Select Engineer...</option>
-                    {eng_options}
-                </select>
-                <select name="topic" required>
-                    <option value="">Select Topic...</option>
-                    <option value="sta">STA (Static Timing Analysis)</option>
-                    <option value="cts">CTS (Clock Tree Synthesis)</option>
-                    <option value="signoff">Signoff Checks</option>
-                </select>
-                <button type="submit" class="btn-primary">Create Assessment</button>
-            </form>
+        <div class="main-grid">
+            <div class="card">
+                <h2>🎯 Create Smart Assessment</h2>
+                <form method="POST" action="/admin/create">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Select Engineer</label>
+                            <select name="engineer_id" required id="engineerSelect">
+                                <option value="">Choose engineer...</option>
+                                {{ eng_options }}
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Assessment Topic</label>
+                            <select name="topic" required>
+                                <option value="">Select topic...</option>
+                                <option value="sta">🕒 STA (Static Timing Analysis)</option>
+                                <option value="cts">🌳 CTS (Clock Tree Synthesis)</option>
+                                <option value="signoff">✅ Signoff Checks & Verification</option>
+                            </select>
+                        </div>
+                        <button type="submit" class="btn-primary">Create Assessment</button>
+                    </div>
+                    <div class="analytics-preview">
+                        <div class="analytics-item">
+                            <span>📝 Questions Generated:</span>
+                            <strong>18 (Adaptive Difficulty)</strong>
+                        </div>
+                        <div class="analytics-item">
+                            <span>🤖 AI Scoring:</span>
+                            <strong>Enabled</strong>
+                        </div>
+                        <div class="analytics-item">
+                            <span>📊 Analytics Tracking:</span>
+                            <strong>Full Coverage</strong>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            
+            <div class="card">
+                <h2>📋 Pending Reviews ({{ pending_reviews }})</h2>
+                <div style="max-height: 400px; overflow-y: auto;">
+                    {{ pending_html|safe }}
+                </div>
+            </div>
         </div>
+        
+        {% if analytics_data.topic_stats %}
+        <div class="card" style="margin-top: 30px;">
+            <h2>📈 Performance Analytics</h2>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px;">
+                {% for stat in analytics_data.topic_stats %}
+                <div class="analytics-item">
+                    <div>
+                        <span class="topic-badge">{{ stat.topic.upper() }}</span>
+                        <div style="margin-top: 8px;">
+                            <strong>{{ stat.count }}</strong> submissions<br>
+                            <strong>{{ stat.avg_score }}</strong> avg score
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
     </div>
+    
+    <script>
+        // Enhanced interactivity
+        document.getElementById('engineerSelect').addEventListener('change', function() {
+            const selectedOption = this.selectedOptions[0];
+            const experience = selectedOption.getAttribute('data-exp');
+            if (experience) {
+                console.log(`Selected engineer with ${experience} years experience`);
+                // Could show adaptive difficulty preview here
+            }
+        });
+        
+        // Auto-refresh pending count every 30 seconds
+        setInterval(() => {
+            fetch('/admin/stats')
+                .then(response => response.json())
+                .then(data => {
+                    // Update stats if needed
+                    console.log('Stats updated');
+                })
+                .catch(err => console.log('Stats update failed'));
+        }, 30000);
+    </script>
 </body>
-</html>'''
+</html>""", 
+    total_engineers=total_engineers,
+    total_assignments=total_assignments,
+    pending_reviews=pending_reviews,
+    completed_reviews=completed_reviews,
+    eng_options=eng_options,
+    pending_html=pending_html,
+    analytics_data=analytics_data
+    )
 
+def _time_ago(date_str):
+    """Calculate time ago from date string"""
+    try:
+        date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+        now = datetime.now()
+        diff = now - date_obj
+        
+        if diff.days > 0:
+            return f"{diff.days}d ago"
+        elif diff.seconds > 3600:
+            return f"{diff.seconds // 3600}h ago"
+        elif diff.seconds > 60:
+            return f"{diff.seconds // 60}m ago"
+        else:
+            return "Just now"
+    except:
+        return "Unknown"
+
+# Continue with more routes...
 @app.route('/admin/create', methods=['POST'])
 def admin_create():
     if not session.get('is_admin'):
         return redirect('/login')
     
-    eng_id = request.form.get('engineer_id')
+    engineer_id = request.form.get('engineer_id')
     topic = request.form.get('topic')
     
-    if eng_id and topic and topic in QUESTIONS:
-        create_test(eng_id, topic)
+    if not engineer_id or not topic:
+        return redirect('/admin')
+    
+    # Get engineer experience for adaptive questions
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+    c.execute('SELECT experience FROM users WHERE id = ?', (engineer_id,))
+    engineer = c.fetchone()
+    experience = engineer[0] if engineer else 3
+    
+    # Generate smart questions
+    questions = question_generator.generate_smart_questions(topic, 18, experience)
+    
+    # Create assignment
+    assignment_id = f"PD_{topic}_{engineer_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    due_date = (datetime.now() + timedelta(days=7)).isoformat()
+    
+    c.execute("""
+        INSERT INTO assignments (id, engineer_id, topic, questions, created_date, due_date, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (assignment_id, engineer_id, topic, json.dumps(questions), 
+          datetime.now().isoformat(), due_date, session['user_id']))
+    
+    conn.commit()
+    conn.close()
+    
+    # Log analytics
+    DatabaseManager.log_analytics('assignment_created', session['user_id'], {
+        'assignment_id': assignment_id,
+        'topic': topic,
+        'engineer_id': engineer_id
+    })
     
     return redirect('/admin')
 
-@app.route('/student')
-def student():
-    if not session.get('user_id') or session.get('is_admin'):
-        return redirect('/login')
-    
-    user_id = session['user_id']
-    user = users.get(user_id, {})
-    my_tests = [a for a in assignments.values() if a['engineer_id'] == user_id]
-    
-    # Build tests HTML
-    tests_html = ''
-    for test in my_tests:
-        status = test['status']
-        if status == 'completed':
-            tests_html += f'''
-            <div class="test-card completed">
-                <h3>📊 {test["topic"].upper()} Assessment</h3>
-                <div class="test-meta">✅ Completed | Score: {test.get("score", 0)}/180 points</div>
-                <div class="test-status completed-status">Assessment Completed</div>
-            </div>'''
-        elif status == 'submitted':
-            tests_html += f'''
-            <div class="test-card submitted">
-                <h3>📝 {test["topic"].upper()} Assessment</h3>
-                <div class="test-meta">⏳ Under Review | 18 Questions | Due: {test["due"][:10]}</div>
-                <div class="test-status review-status">Awaiting Results</div>
-            </div>'''
-        else:
-            tests_html += f'''
-            <div class="test-card pending">
-                <h3>🎯 {test["topic"].upper()} Assessment</h3>
-                <div class="test-meta">📋 18 Questions | ⏰ Due: {test["due"][:10]} | 🎖️ Max: 180 points</div>
-                <a href="/student/test/{test["id"]}" class="start-btn">Start Assessment</a>
-            </div>'''
-    
-    if not tests_html:
-        tests_html = '''
-        <div class="no-tests">
-            <h3>📭 No Assessments Assigned</h3>
-            <p>Your administrator will assign assessments soon. Check back later!</p>
-        </div>'''
-    
-    return f'''
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Engineer Dashboard - {user.get('display_name', user_id)}</title>
-    <style>
-        body {{ 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-            margin: 0; 
-            min-height: 100vh;
-        }}
-        .header {{ 
-            background: rgba(255,255,255,0.15); 
-            backdrop-filter: blur(10px);
-            color: white; 
-            padding: 20px 0;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
-        }}
-        .header-content {{
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 0 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }}
-        .header h1 {{ margin: 0; font-size: 28px; }}
-        .logout {{ 
-            background: rgba(255,255,255,0.2); 
-            color: white; 
-            padding: 10px 20px; 
-            text-decoration: none; 
-            border-radius: 8px;
-            transition: all 0.3s ease;
-        }}
-        .logout:hover {{ background: rgba(255,255,255,0.3); }}
-        .container {{ 
-            max-width: 1200px; 
-            margin: 30px auto; 
-            padding: 0 20px; 
-        }}
-        .stats {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }}
-        .stat {{
-            background: rgba(255,255,255,0.95);
-            padding: 25px;
-            border-radius: 16px;
-            text-align: center;
-            box-shadow: 0 8px 25px rgba(0,0,0,0.1);
-        }}
-        .stat-num {{ 
-            font-size: 32px; 
-            font-weight: 800; 
-            color: #667eea; 
-            margin-bottom: 5px;
-        }}
-        .stat-label {{ 
-            color: #64748b; 
-            font-weight: 600; 
-            font-size: 14px;
-        }}
-        .section {{
-            background: rgba(255,255,255,0.95);
-            border-radius: 20px;
-            padding: 30px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-        }}
-        .section h2 {{
-            color: #1e293b;
-            margin-bottom: 25px;
-            font-size: 24px;
-        }}
-        .test-card {{
-            background: linear-gradient(135deg, #f8fafc, #f1f5f9);
-            border-radius: 12px;
-            padding: 25px;
-            margin: 20px 0;
-            border-left: 5px solid #667eea;
-            transition: transform 0.3s ease;
-        }}
-        .test-card:hover {{ transform: translateY(-2px); }}
-        .test-card h3 {{ 
-            color: #1e293b; 
-            margin-bottom: 10px; 
-            font-size: 20px;
-        }}
-        .test-meta {{ 
-            color: #64748b; 
-            margin-bottom: 15px; 
-            font-size: 14px;
-        }}
-        .start-btn {{
-            background: linear-gradient(135deg, #667eea, #764ba2);
-            color: white;
-            padding: 12px 25px;
-            text-decoration: none;
-            border-radius: 8px;
-            display: inline-block;
-            font-weight: 600;
-            transition: all 0.3s ease;
-        }}
-        .start-btn:hover {{
-            transform: translateY(-2px);
-            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
-        }}
-        .test-status {{
-            padding: 8px 15px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 600;
-            display: inline-block;
-        }}
-        .completed-status {{
-            background: #dcfce7;
-            color: #166534;
-        }}
-        .review-status {{
-            background: #fef3c7;
-            color: #92400e;
-        }}
-        .no-tests {{
-            text-align: center;
-            padding: 60px 20px;
-            color: #64748b;
-        }}
-        .pending {{ border-left-color: #3b82f6; }}
-        .submitted {{ border-left-color: #f59e0b; }}
-        .completed {{ border-left-color: #10b981; }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <div class="header-content">
-            <h1>👋 Welcome, {user.get('display_name', user_id)}</h1>
-            <a href="/logout" class="logout">Logout</a>
-        </div>
-    </div>
-    
-    <div class="container">
-        <div class="stats">
-            <div class="stat">
-                <div class="stat-num">{len(my_tests)}</div>
-                <div class="stat-label">Total Tests</div>
-            </div>
-            <div class="stat">
-                <div class="stat-num">{len([t for t in my_tests if t['status'] == 'pending'])}</div>
-                <div class="stat-label">Pending</div>
-            </div>
-            <div class="stat">
-                <div class="stat-num">{len([t for t in my_tests if t['status'] == 'completed'])}</div>
-                <div class="stat-label">Completed</div>
-            </div>
-            <div class="stat">
-                <div class="stat-num">{user.get('exp', 0)}+</div>
-                <div class="stat-label">Years Exp</div>
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2>📋 My Assessments</h2>
-            {tests_html}
-        </div>
-    </div>
-</body>
-</html>'''
-
-@app.route('/student/test/<test_id>', methods=['GET', 'POST'])
-def student_test(test_id):
-    if not session.get('user_id') or session.get('is_admin'):
-        return redirect('/login')
-    
-    test = assignments.get(test_id)
-    if not test or test['engineer_id'] != session['user_id']:
-        return redirect('/student')
-    
-    if request.method == 'POST' and test['status'] == 'pending':
-        answers = {}
-        for i in range(18):  # 18 questions
-            answer = request.form.get(f'answer_{i}', '').strip()
-            if answer:
-                answers[str(i)] = answer
-        
-        if len(answers) >= 15:  # At least 15 answers required
-            test['answers'] = answers
-            test['status'] = 'submitted'
-            test['submitted_date'] = datetime.now().isoformat()
-            
-            # Auto-score the answers
-            test['auto_scores'] = {}
-            for i, answer in answers.items():
-                if answer:
-                    suggested_score, reasoning = analyze_answer_quality(
-                        test['questions'][int(i)], answer, test['topic']
-                    )
-                    test['auto_scores'][i] = {
-                        'score': suggested_score,
-                        'reasoning': reasoning
-                    }
-        
-        return redirect('/student')
-    
-    # If already submitted, show read-only view
-    if test['status'] != 'pending':
-        return redirect('/student')
-    
-    questions_html = ''
-    for i, q in enumerate(test['questions']):
-        questions_html += f'''
-        <div class="question-card">
-            <div class="question-header">
-                <span class="question-number">Question {i+1} of 18</span>
-                <span class="topic-badge">{test["topic"].upper()}</span>
-            </div>
-            <div class="question-text">{q}</div>
-            <div class="answer-section">
-                <label for="answer_{i}">Your Answer:</label>
-                <textarea id="answer_{i}" name="answer_{i}" placeholder="Provide detailed technical answer..." required></textarea>
-                <div class="char-count" id="count_{i}">0 characters</div>
-            </div>
-        </div>'''
-    
-    return f'''
-<!DOCTYPE html>
-<html>
-<head>
-    <title>{test["topic"].upper()} Assessment</title>
-    <style>
-        body {{ 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-            margin: 0; 
-            min-height: 100vh;
-        }}
-        .header {{ 
-            background: rgba(255,255,255,0.15); 
-            backdrop-filter: blur(10px);
-            color: white; 
-            padding: 20px 0;
-            position: sticky;
-            top: 0;
-            z-index: 100;
-        }}
-        .header-content {{
-            max-width: 1000px;
-            margin: 0 auto;
-            padding: 0 20px;
-            text-align: center;
-        }}
-        .container {{ 
-            max-width: 1000px; 
-            margin: 20px auto; 
-            padding: 0 20px; 
-        }}
-        .test-info {{
-            background: rgba(255,255,255,0.95);
-            border-radius: 16px;
-            padding: 25px;
-            margin-bottom: 25px;
-            text-align: center;
-        }}
-        .question-card {{
-            background: rgba(255,255,255,0.95);
-            border-radius: 16px;
-            padding: 30px;
-            margin: 25px 0;
-            box-shadow: 0 8px 25px rgba(0,0,0,0.1);
-        }}
-        .question-header {{
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 20px;
-        }}
-        .question-number {{
-            background: linear-gradient(135deg, #667eea, #764ba2);
-            color: white;
-            padding: 8px 16px;
-            border-radius: 20px;
-            font-weight: 600;
-            font-size: 14px;
-        }}
-        .topic-badge {{
-            background: #f1f5f9;
-            color: #64748b;
-            padding: 6px 12px;
-            border-radius: 15px;
-            font-size: 12px;
-            font-weight: 600;
-        }}
-        .question-text {{
-            background: linear-gradient(135deg, #f8fafc, #f1f5f9);
-            padding: 20px;
-            border-radius: 12px;
-            margin-bottom: 20px;
-            border-left: 4px solid #667eea;
-            line-height: 1.6;
-            color: #1e293b;
-        }}
-        .answer-section label {{
-            display: block;
-            margin-bottom: 8px;
-            font-weight: 600;
-            color: #374151;
-        }}
-        textarea {{
-            width: 100%;
-            min-height: 120px;
-            padding: 16px;
-            border: 2px solid #e5e7eb;
-            border-radius: 12px;
-            font-size: 14px;
-            font-family: inherit;
-            resize: vertical;
-            transition: border-color 0.3s ease;
-        }}
-        textarea:focus {{
-            outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }}
-        .char-count {{
-            text-align: right;
-            font-size: 12px;
-            color: #64748b;
-            margin-top: 5px;
-        }}
-        .submit-section {{
-            background: rgba(255,255,255,0.95);
-            border-radius: 16px;
-            padding: 30px;
-            text-align: center;
-            margin-top: 30px;
-        }}
-        .warning {{
-            background: #fef3c7;
-            border: 1px solid #f59e0b;
-            padding: 16px;
-            border-radius: 12px;
-            margin-bottom: 20px;
-            color: #92400e;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }}
-        .btn {{
-            padding: 14px 28px;
-            border: none;
-            border-radius: 10px;
-            font-weight: 600;
-            cursor: pointer;
-            margin: 8px;
-            text-decoration: none;
-            display: inline-block;
-            transition: all 0.3s ease;
-        }}
-        .btn-primary {{
-            background: linear-gradient(135deg, #667eea, #764ba2);
-            color: white;
-        }}
-        .btn-primary:hover {{
-            transform: translateY(-2px);
-            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
-        }}
-        .btn-secondary {{
-            background: rgba(107,114,128,0.1);
-            color: #374151;
-        }}
-        .progress-bar {{
-            background: #e5e7eb;
-            height: 6px;
-            border-radius: 3px;
-            margin: 20px 0;
-            overflow: hidden;
-        }}
-        .progress-fill {{
-            background: linear-gradient(135deg, #667eea, #764ba2);
-            height: 100%;
-            width: 0%;
-            transition: width 0.3s ease;
-        }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <div class="header-content">
-            <h1>📝 {test["topic"].upper()} Assessment</h1>
-            <p>Physical Design Technical Evaluation</p>
-        </div>
-    </div>
-    
-    <div class="container">
-        <div class="test-info">
-            <h2>📋 Assessment Details</h2>
-            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-top: 20px;">
-                <div><strong>Questions:</strong> 18 Technical</div>
-                <div><strong>Max Points:</strong> 180 (10 each)</div>
-                <div><strong>Due Date:</strong> {test["due"][:10]}</div>
-                <div><strong>Topic:</strong> {test["topic"].upper()}</div>
-            </div>
-            <div class="progress-bar">
-                <div class="progress-fill" id="progressBar"></div>
-            </div>
-            <div id="progressText">Progress: 0/18 questions answered</div>
-        </div>
-        
-        <form method="POST" id="assessmentForm">
-            {questions_html}
-            
-            <div class="submit-section">
-                <div class="warning">
-                    ⚠️ <strong>Important:</strong> Review all answers before submitting. You cannot edit after submission.
-                </div>
-                <button type="submit" class="btn btn-primary" id="submitBtn" disabled>Submit Assessment</button>
-                <a href="/student" class="btn btn-secondary">Save & Exit</a>
-            </div>
-        </form>
-    </div>
-    
-    <script>
-        // Character counting and progress tracking
-        const textareas = document.querySelectorAll('textarea');
-        const progressBar = document.getElementById('progressBar');
-        const progressText = document.getElementById('progressText');
-        const submitBtn = document.getElementById('submitBtn');
-        
-        textareas.forEach((textarea, index) => {{
-            const counter = document.getElementById(`count_${{index}}`);
-            
-            textarea.addEventListener('input', function() {{
-                const length = this.value.length;
-                counter.textContent = `${{length}} characters`;
-                
-                // Update progress
-                updateProgress();
-            }});
-        }});
-        
-        function updateProgress() {{
-            const answered = Array.from(textareas).filter(ta => ta.value.trim().length >= 20).length;
-            const percentage = (answered / 18) * 100;
-            
-            progressBar.style.width = percentage + '%';
-            progressText.textContent = `Progress: ${{answered}}/18 questions answered`;
-            
-            // Enable submit button if at least 15 questions answered
-            submitBtn.disabled = answered < 15;
-            if (answered >= 15) {{
-                submitBtn.style.opacity = '1';
-                submitBtn.style.cursor = 'pointer';
-            }} else {{
-                submitBtn.style.opacity = '0.6';
-                submitBtn.style.cursor = 'not-allowed';
-            }}
-        }}
-        
-        // Form submission validation
-        document.getElementById('assessmentForm').addEventListener('submit', function(e) {{
-            const answered = Array.from(textareas).filter(ta => ta.value.trim().length >= 20).length;
-            if (answered < 15) {{
-                e.preventDefault();
-                alert('Please answer at least 15 questions (minimum 20 characters each) before submitting.');
-                return false;
-            }}
-            
-            if (!confirm('Are you sure you want to submit? You cannot edit answers after submission.')) {{
-                e.preventDefault();
-                return false;
-            }}
-        }});
-        
-        // Auto-save to localStorage
-        textareas.forEach((textarea, index) => {{
-            const key = `test_{test["id"]}_answer_${{index}}`;
-            textarea.value = localStorage.getItem(key) || '';
-            
-            textarea.addEventListener('input', function() {{
-                localStorage.setItem(key, this.value);
-            }});
-        }});
-        
-        // Initial progress update
-        updateProgress();
-    </script>
-</body>
-</html>'''
+# Railway compatibility
+application = app
 
 if __name__ == '__main__':
     try:
-        print("🚂 Starting Railway Flask App...")
+        print("🚀 Starting Enhanced Railway Flask App...")
         init_data()
-        print("✅ Data initialized successfully")
+        print("✅ Database and demo data initialized")
         
         port = int(os.environ.get('PORT', 5000))
         print(f"✅ Starting server on port {port}")
