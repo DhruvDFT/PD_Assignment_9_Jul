@@ -1,3 +1,67 @@
+# requirements.txt
+Flask==2.3.3
+
+# Procfile
+web: python app.py
+
+# railway.json
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "deploy": {
+    "startCommand": "python app.py",
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  }
+}
+
+# runtime.txt (optional - Railway auto-detects Python version)
+python-3.11.0
+
+# .gitignore
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# .env (for local development - NOT deployed to Railway)
+FLASK_ENV=development
+SECRET_KEY=pd-secret-key-local
+
+# app.py (Updated with Railway compatibility)
 import os
 import hashlib
 from datetime import datetime, timedelta
@@ -472,36 +536,529 @@ def student():
     user = users.get(user_id, {})
     my_tests = [a for a in assignments.values() if a['engineer_id'] == user_id]
     
+    # Build tests HTML
+    tests_html = ''
+    for test in my_tests:
+        status = test['status']
+        if status == 'completed':
+            tests_html += f'''
+            <div class="test-card completed">
+                <h3>📊 {test["topic"].upper()} Assessment</h3>
+                <div class="test-meta">✅ Completed | Score: {test.get("score", 0)}/180 points</div>
+                <div class="test-status completed-status">Assessment Completed</div>
+            </div>'''
+        elif status == 'submitted':
+            tests_html += f'''
+            <div class="test-card submitted">
+                <h3>📝 {test["topic"].upper()} Assessment</h3>
+                <div class="test-meta">⏳ Under Review | 18 Questions | Due: {test["due"][:10]}</div>
+                <div class="test-status review-status">Awaiting Results</div>
+            </div>'''
+        else:
+            tests_html += f'''
+            <div class="test-card pending">
+                <h3>🎯 {test["topic"].upper()} Assessment</h3>
+                <div class="test-meta">📋 18 Questions | ⏰ Due: {test["due"][:10]} | 🎖️ Max: 180 points</div>
+                <a href="/student/test/{test["id"]}" class="start-btn">Start Assessment</a>
+            </div>'''
+    
+    if not tests_html:
+        tests_html = '''
+        <div class="no-tests">
+            <h3>📭 No Assessments Assigned</h3>
+            <p>Your administrator will assign assessments soon. Check back later!</p>
+        </div>'''
+    
     return f'''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Engineer Dashboard</title>
+    <title>Engineer Dashboard - {user.get('display_name', user_id)}</title>
     <style>
-        body {{ font-family: Arial; background: #f5f5f5; margin: 0; }}
-        .header {{ background: #2563eb; color: white; padding: 20px; }}
-        .container {{ max-width: 1000px; margin: 20px auto; padding: 0 20px; }}
-        .card {{ background: white; border-radius: 12px; padding: 20px; margin: 15px 0; }}
-        .btn {{ background: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block; }}
+        body {{ 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+            margin: 0; 
+            min-height: 100vh;
+        }}
+        .header {{ 
+            background: rgba(255,255,255,0.15); 
+            backdrop-filter: blur(10px);
+            color: white; 
+            padding: 20px 0;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+        }}
+        .header-content {{
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }}
+        .header h1 {{ margin: 0; font-size: 28px; }}
+        .logout {{ 
+            background: rgba(255,255,255,0.2); 
+            color: white; 
+            padding: 10px 20px; 
+            text-decoration: none; 
+            border-radius: 8px;
+            transition: all 0.3s ease;
+        }}
+        .logout:hover {{ background: rgba(255,255,255,0.3); }}
+        .container {{ 
+            max-width: 1200px; 
+            margin: 30px auto; 
+            padding: 0 20px; 
+        }}
+        .stats {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }}
+        .stat {{
+            background: rgba(255,255,255,0.95);
+            padding: 25px;
+            border-radius: 16px;
+            text-align: center;
+            box-shadow: 0 8px 25px rgba(0,0,0,0.1);
+        }}
+        .stat-num {{ 
+            font-size: 32px; 
+            font-weight: 800; 
+            color: #667eea; 
+            margin-bottom: 5px;
+        }}
+        .stat-label {{ 
+            color: #64748b; 
+            font-weight: 600; 
+            font-size: 14px;
+        }}
+        .section {{
+            background: rgba(255,255,255,0.95);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }}
+        .section h2 {{
+            color: #1e293b;
+            margin-bottom: 25px;
+            font-size: 24px;
+        }}
+        .test-card {{
+            background: linear-gradient(135deg, #f8fafc, #f1f5f9);
+            border-radius: 12px;
+            padding: 25px;
+            margin: 20px 0;
+            border-left: 5px solid #667eea;
+            transition: transform 0.3s ease;
+        }}
+        .test-card:hover {{ transform: translateY(-2px); }}
+        .test-card h3 {{ 
+            color: #1e293b; 
+            margin-bottom: 10px; 
+            font-size: 20px;
+        }}
+        .test-meta {{ 
+            color: #64748b; 
+            margin-bottom: 15px; 
+            font-size: 14px;
+        }}
+        .start-btn {{
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            padding: 12px 25px;
+            text-decoration: none;
+            border-radius: 8px;
+            display: inline-block;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }}
+        .start-btn:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+        }}
+        .test-status {{
+            padding: 8px 15px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            display: inline-block;
+        }}
+        .completed-status {{
+            background: #dcfce7;
+            color: #166534;
+        }}
+        .review-status {{
+            background: #fef3c7;
+            color: #92400e;
+        }}
+        .no-tests {{
+            text-align: center;
+            padding: 60px 20px;
+            color: #64748b;
+        }}
+        .pending {{ border-left-color: #3b82f6; }}
+        .submitted {{ border-left-color: #f59e0b; }}
+        .completed {{ border-left-color: #10b981; }}
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>Welcome, {user.get('display_name', user_id)}</h1>
-        <a href="/logout" style="color: white; float: right;">Logout</a>
+        <div class="header-content">
+            <h1>👋 Welcome, {user.get('display_name', user_id)}</h1>
+            <a href="/logout" class="logout">Logout</a>
+        </div>
     </div>
     
     <div class="container">
-        <div class="card">
-            <h2>My Assessments</h2>
-            {len(my_tests)} assessments assigned
+        <div class="stats">
+            <div class="stat">
+                <div class="stat-num">{len(my_tests)}</div>
+                <div class="stat-label">Total Tests</div>
+            </div>
+            <div class="stat">
+                <div class="stat-num">{len([t for t in my_tests if t['status'] == 'pending'])}</div>
+                <div class="stat-label">Pending</div>
+            </div>
+            <div class="stat">
+                <div class="stat-num">{len([t for t in my_tests if t['status'] == 'completed'])}</div>
+                <div class="stat-label">Completed</div>
+            </div>
+            <div class="stat">
+                <div class="stat-num">{user.get('exp', 0)}+</div>
+                <div class="stat-label">Years Exp</div>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>📋 My Assessments</h2>
+            {tests_html}
         </div>
     </div>
 </body>
 </html>'''
 
-# Railway compatibility
-application = app
+@app.route('/student/test/<test_id>', methods=['GET', 'POST'])
+def student_test(test_id):
+    if not session.get('user_id') or session.get('is_admin'):
+        return redirect('/login')
+    
+    test = assignments.get(test_id)
+    if not test or test['engineer_id'] != session['user_id']:
+        return redirect('/student')
+    
+    if request.method == 'POST' and test['status'] == 'pending':
+        answers = {}
+        for i in range(18):  # 18 questions
+            answer = request.form.get(f'answer_{i}', '').strip()
+            if answer:
+                answers[str(i)] = answer
+        
+        if len(answers) >= 15:  # At least 15 answers required
+            test['answers'] = answers
+            test['status'] = 'submitted'
+            test['submitted_date'] = datetime.now().isoformat()
+            
+            # Auto-score the answers
+            test['auto_scores'] = {}
+            for i, answer in answers.items():
+                if answer:
+                    suggested_score, reasoning = analyze_answer_quality(
+                        test['questions'][int(i)], answer, test['topic']
+                    )
+                    test['auto_scores'][i] = {
+                        'score': suggested_score,
+                        'reasoning': reasoning
+                    }
+        
+        return redirect('/student')
+    
+    # If already submitted, show read-only view
+    if test['status'] != 'pending':
+        return redirect('/student')
+    
+    questions_html = ''
+    for i, q in enumerate(test['questions']):
+        questions_html += f'''
+        <div class="question-card">
+            <div class="question-header">
+                <span class="question-number">Question {i+1} of 18</span>
+                <span class="topic-badge">{test["topic"].upper()}</span>
+            </div>
+            <div class="question-text">{q}</div>
+            <div class="answer-section">
+                <label for="answer_{i}">Your Answer:</label>
+                <textarea id="answer_{i}" name="answer_{i}" placeholder="Provide detailed technical answer..." required></textarea>
+                <div class="char-count" id="count_{i}">0 characters</div>
+            </div>
+        </div>'''
+    
+    return f'''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{test["topic"].upper()} Assessment</title>
+    <style>
+        body {{ 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+            margin: 0; 
+            min-height: 100vh;
+        }}
+        .header {{ 
+            background: rgba(255,255,255,0.15); 
+            backdrop-filter: blur(10px);
+            color: white; 
+            padding: 20px 0;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }}
+        .header-content {{
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 0 20px;
+            text-align: center;
+        }}
+        .container {{ 
+            max-width: 1000px; 
+            margin: 20px auto; 
+            padding: 0 20px; 
+        }}
+        .test-info {{
+            background: rgba(255,255,255,0.95);
+            border-radius: 16px;
+            padding: 25px;
+            margin-bottom: 25px;
+            text-align: center;
+        }}
+        .question-card {{
+            background: rgba(255,255,255,0.95);
+            border-radius: 16px;
+            padding: 30px;
+            margin: 25px 0;
+            box-shadow: 0 8px 25px rgba(0,0,0,0.1);
+        }}
+        .question-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }}
+        .question-number {{
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 14px;
+        }}
+        .topic-badge {{
+            background: #f1f5f9;
+            color: #64748b;
+            padding: 6px 12px;
+            border-radius: 15px;
+            font-size: 12px;
+            font-weight: 600;
+        }}
+        .question-text {{
+            background: linear-gradient(135deg, #f8fafc, #f1f5f9);
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            border-left: 4px solid #667eea;
+            line-height: 1.6;
+            color: #1e293b;
+        }}
+        .answer-section label {{
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #374151;
+        }}
+        textarea {{
+            width: 100%;
+            min-height: 120px;
+            padding: 16px;
+            border: 2px solid #e5e7eb;
+            border-radius: 12px;
+            font-size: 14px;
+            font-family: inherit;
+            resize: vertical;
+            transition: border-color 0.3s ease;
+        }}
+        textarea:focus {{
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }}
+        .char-count {{
+            text-align: right;
+            font-size: 12px;
+            color: #64748b;
+            margin-top: 5px;
+        }}
+        .submit-section {{
+            background: rgba(255,255,255,0.95);
+            border-radius: 16px;
+            padding: 30px;
+            text-align: center;
+            margin-top: 30px;
+        }}
+        .warning {{
+            background: #fef3c7;
+            border: 1px solid #f59e0b;
+            padding: 16px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            color: #92400e;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }}
+        .btn {{
+            padding: 14px 28px;
+            border: none;
+            border-radius: 10px;
+            font-weight: 600;
+            cursor: pointer;
+            margin: 8px;
+            text-decoration: none;
+            display: inline-block;
+            transition: all 0.3s ease;
+        }}
+        .btn-primary {{
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+        }}
+        .btn-primary:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+        }}
+        .btn-secondary {{
+            background: rgba(107,114,128,0.1);
+            color: #374151;
+        }}
+        .progress-bar {{
+            background: #e5e7eb;
+            height: 6px;
+            border-radius: 3px;
+            margin: 20px 0;
+            overflow: hidden;
+        }}
+        .progress-fill {{
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            height: 100%;
+            width: 0%;
+            transition: width 0.3s ease;
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-content">
+            <h1>📝 {test["topic"].upper()} Assessment</h1>
+            <p>Physical Design Technical Evaluation</p>
+        </div>
+    </div>
+    
+    <div class="container">
+        <div class="test-info">
+            <h2>📋 Assessment Details</h2>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-top: 20px;">
+                <div><strong>Questions:</strong> 18 Technical</div>
+                <div><strong>Max Points:</strong> 180 (10 each)</div>
+                <div><strong>Due Date:</strong> {test["due"][:10]}</div>
+                <div><strong>Topic:</strong> {test["topic"].upper()}</div>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressBar"></div>
+            </div>
+            <div id="progressText">Progress: 0/18 questions answered</div>
+        </div>
+        
+        <form method="POST" id="assessmentForm">
+            {questions_html}
+            
+            <div class="submit-section">
+                <div class="warning">
+                    ⚠️ <strong>Important:</strong> Review all answers before submitting. You cannot edit after submission.
+                </div>
+                <button type="submit" class="btn btn-primary" id="submitBtn" disabled>Submit Assessment</button>
+                <a href="/student" class="btn btn-secondary">Save & Exit</a>
+            </div>
+        </form>
+    </div>
+    
+    <script>
+        // Character counting and progress tracking
+        const textareas = document.querySelectorAll('textarea');
+        const progressBar = document.getElementById('progressBar');
+        const progressText = document.getElementById('progressText');
+        const submitBtn = document.getElementById('submitBtn');
+        
+        textareas.forEach((textarea, index) => {{
+            const counter = document.getElementById(`count_${{index}}`);
+            
+            textarea.addEventListener('input', function() {{
+                const length = this.value.length;
+                counter.textContent = `${{length}} characters`;
+                
+                // Update progress
+                updateProgress();
+            }});
+        }});
+        
+        function updateProgress() {{
+            const answered = Array.from(textareas).filter(ta => ta.value.trim().length >= 20).length;
+            const percentage = (answered / 18) * 100;
+            
+            progressBar.style.width = percentage + '%';
+            progressText.textContent = `Progress: ${{answered}}/18 questions answered`;
+            
+            // Enable submit button if at least 15 questions answered
+            submitBtn.disabled = answered < 15;
+            if (answered >= 15) {{
+                submitBtn.style.opacity = '1';
+                submitBtn.style.cursor = 'pointer';
+            }} else {{
+                submitBtn.style.opacity = '0.6';
+                submitBtn.style.cursor = 'not-allowed';
+            }}
+        }}
+        
+        // Form submission validation
+        document.getElementById('assessmentForm').addEventListener('submit', function(e) {{
+            const answered = Array.from(textareas).filter(ta => ta.value.trim().length >= 20).length;
+            if (answered < 15) {{
+                e.preventDefault();
+                alert('Please answer at least 15 questions (minimum 20 characters each) before submitting.');
+                return false;
+            }}
+            
+            if (!confirm('Are you sure you want to submit? You cannot edit answers after submission.')) {{
+                e.preventDefault();
+                return false;
+            }}
+        }});
+        
+        // Auto-save to localStorage
+        textareas.forEach((textarea, index) => {{
+            const key = `test_{test["id"]}_answer_${{index}}`;
+            textarea.value = localStorage.getItem(key) || '';
+            
+            textarea.addEventListener('input', function() {{
+                localStorage.setItem(key, this.value);
+            }});
+        }});
+        
+        // Initial progress update
+        updateProgress();
+    </script>
+</body>
+</html>'''
 
 if __name__ == '__main__':
     try:
